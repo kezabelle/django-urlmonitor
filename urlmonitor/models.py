@@ -30,30 +30,61 @@ def maybe_update_redirect(sender, instance, using, *args, **kwargs):
     if not instance.pk:
         return False
 
-    # no configured URL to monitor
-    if not hasattr(instance, 'get_absolute_url'):
-        return False
-
-    new_url = instance.get_absolute_url()
-    previous_obj = sender._default_manager.using(using).get(pk=instance.pk)
-    old_url = previous_obj.get_absolute_url()
-
-    if new_url == old_url:
-        return False
-
-    # either update the existing redirect to point to the new url, or create
-    # a new one - avoiding any further signals listening to Redirect
     manager = Redirect.objects.using(using)
-    try:
-        old_redirect = manager.get(old_path=old_url)
-        manager.filter(pk=old_redirect.pk).update(new_path=new_url)
-    except Redirect.DoesNotExist:
-        manager.create(old_path=old_url, new_path=new_url,
-                       site=Site.objects.get_current())
 
-    # delete anything that has our *new* URL as its old path.
-    manager.filter(old_path=new_url).delete()
-    return True
+    attrs_to_check = ('get_absolute_url', 'get_list_url')
+
+    # this pre-check allows us to fail early without asking the DB for the
+    # old instance.
+    has_valid_attribute = False
+    for attrib in attrs_to_check:
+        url_attr = getattr(instance, attrib, None)
+        # no configured URL to monitor
+        if url_attr is not None and callable(url_attr):
+            has_valid_attribute = True
+
+    if not has_valid_attribute:
+        return False
+
+    # we now know it's worth getting the old instance from the DB.
+    previous_obj = sender._default_manager.using(using).get(pk=instance.pk)
+
+    a_url_changed = False
+
+    # we know we'll have at least one URL to compare and handle.
+    for attrib in attrs_to_check:
+        instance_url = getattr(instance, attrib, None)
+        previous_url = getattr(previous_obj, attrib, None)
+
+        if instance_url is not None and callable(instance_url):
+            new_url = instance_url()
+        if previous_url is not None and callable(previous_url):
+            old_url = previous_url()
+
+        # they're the same, so skip doing anything else in this iteration.
+        if new_url == old_url:
+            continue
+
+        a_url_changed = True
+
+        # either update the existing redirect to point to the new url, or
+        # create a new one - avoiding any further signals listening to Redirect
+
+        try:
+            # ask for any old redirect that exists for the old url
+            old_redirect = manager.get(old_path=old_url)
+        except Redirect.DoesNotExist:
+            # there was no previous redirect, and the URLs aren't the same,
+            # so we'll create one.
+            manager.create(old_path=old_url, new_path=new_url,
+                           site=Site.objects.get_current())
+        else:
+            # there was a previous redirect instance, so update it.
+            manager.filter(pk=old_redirect.pk).update(new_path=new_url)
+
+        # delete anything that has our *new* URL as its old path.
+        manager.filter(old_path=new_url).delete()
+    return a_url_changed
 
 
 class URLMonitorConfigError(ImproperlyConfigured):
