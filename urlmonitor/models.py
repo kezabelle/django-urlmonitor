@@ -36,14 +36,14 @@ def maybe_update_redirect(sender, instance, using, *args, **kwargs):
 
     # this pre-check allows us to fail early without asking the DB for the
     # old instance.
-    has_valid_attribute = False
+    valid_attrs_to_check = set()
     for attrib in attrs_to_check:
         url_attr = getattr(instance, attrib, None)
         # no configured URL to monitor
-        if url_attr is not None and callable(url_attr):
-            has_valid_attribute = True
+        if url_attr is not None:
+            valid_attrs_to_check.add(attrib)
 
-    if not has_valid_attribute:
+    if not valid_attrs_to_check:
         return False
 
     # we now know it's worth getting the old instance from the DB.
@@ -52,7 +52,7 @@ def maybe_update_redirect(sender, instance, using, *args, **kwargs):
     a_url_changed = False
 
     # we know we'll have at least one URL to compare and handle.
-    for attrib in attrs_to_check:
+    for attrib in valid_attrs_to_check:
         new_url = getattr(instance, attrib, None)
         old_url = getattr(previous_obj, attrib, None)
 
