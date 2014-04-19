@@ -62,6 +62,10 @@ def maybe_update_redirect(sender, instance, using, *args, **kwargs):
         if old_url is not None and callable(old_url):
             old_url = old_url()
 
+        # make sure both sides aren't stupid
+        if not all((old_url, new_url)):
+            continue
+
         # they're the same, so skip doing anything else in this iteration.
         if new_url == old_url:
             continue
