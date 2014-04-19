@@ -115,7 +115,7 @@ def register_requested_models(configured_models=None):
         logger.info("No model strings configured for URL monitoring")
         return None
 
-    resolved_models = []
+    resolved_models = set()
     for index, model in enumerate(configured_models):
         app, modelname = model.split('.', maxsplit=1)
         try:
@@ -127,21 +127,22 @@ def register_requested_models(configured_models=None):
                    "over {count} configured items; check your "
                    "URLMONITOR_MODELS[{index}] for errors.")
             logger.exception(msg.format(**msg_args))
-        else:
-            resolved_models.append(real_model)
+            real_model = None
+
+        if real_model is not None and real_model not in resolved_models:
+            resolved_models.add(real_model)
+            model_slug = slugify(real_model._meta.verbose_name)
+            uid = "urlmonitor_{0}".format(model_slug)
+            pre_save.connect(receiver=maybe_update_redirect,
+                             sender=real_model, dispatch_uid=uid)
+            debug_msg_args = {'cls': model.__class__, 'uid': uid}
+            debug_msg = ("pre_save signal connected to "
+                         "maybe_update_redirect for {cls} using "
+                         "dispatch_uid={uid}")
+            logger.debug(debug_msg.format(**debug_msg_args))
 
     resolved_models_count = len(resolved_models)
     if resolved_models_count < 1:
         logger.info("No model classes configured for URL monitoring")
         return None
-
-    for model in resolved_models:
-        model_slug = slugify(model._meta.verbose_name)
-        uid = "urlmonitor_{0}".format(model_slug)
-        pre_save.connect(receiver=maybe_update_redirect, sender=model,
-                         dispatch_uid=uid)
-        debug_msg_args = {'cls': model.__class__, 'uid': uid}
-        debug_msg = ("pre_save signal connected to maybe_update_redirect for "
-                     "{cls} using dispatch_uid={uid}")
-        logger.debug(debug_msg.format(**debug_msg_args))  # noqa
     return resolved_models_count
