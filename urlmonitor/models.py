@@ -53,13 +53,14 @@ def maybe_update_redirect(sender, instance, using, *args, **kwargs):
 
     # we know we'll have at least one URL to compare and handle.
     for attrib in attrs_to_check:
-        instance_url = getattr(instance, attrib, None)
-        previous_url = getattr(previous_obj, attrib, None)
+        new_url = getattr(instance, attrib, None)
+        old_url = getattr(previous_obj, attrib, None)
 
-        if instance_url is not None and callable(instance_url):
-            new_url = instance_url()
-        if previous_url is not None and callable(previous_url):
-            old_url = previous_url()
+        # if they're methods (which they usually are) then try and call them.
+        if new_url is not None and callable(new_url):
+            new_url = new_url()
+        if old_url is not None and callable(old_url):
+            old_url = old_url()
 
         # they're the same, so skip doing anything else in this iteration.
         if new_url == old_url:
