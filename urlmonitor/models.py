@@ -12,11 +12,23 @@ try:
 except ImportError:  # pragma: no cover ... Django < 1.7
     from django.db.models.loading import get_model
 
+try:
+    from celery import shared_task
+except ImportError:
+    def shared_task(func):
+        func.delay = func
+        return func
+
 from django.db.models.signals import pre_save
 from django.template.defaultfilters import slugify
+from .utils import hasattrs, maybecallattr
 
 
 logger = logging.getLogger(__name__)
+attrs_to_check = (
+    'get_absolute_url',
+    'get_list_url',
+)
 
 
 def maybe_update_redirect(sender, instance, using, *args, **kwargs):
@@ -30,37 +42,27 @@ def maybe_update_redirect(sender, instance, using, *args, **kwargs):
     if not instance.pk:
         return False
 
-    manager = Redirect.objects.using(using)
-
-    attrs_to_check = ('get_absolute_url', 'get_list_url')
-
+    valid_attrs_to_check = hasattrs(instance, *attrs_to_check)
     # this pre-check allows us to fail early without asking the DB for the
     # old instance.
-    valid_attrs_to_check = set()
-    for attrib in attrs_to_check:
-        url_attr = getattr(instance, attrib, None)
-        # no configured URL to monitor
-        if url_attr is not None:
-            valid_attrs_to_check.add(attrib)
-
     if not valid_attrs_to_check:
         return False
 
     # we now know it's worth getting the old instance from the DB.
-    previous_obj = sender._default_manager.using(using).get(pk=instance.pk)
+    try:
+        previous_obj = sender._default_manager.using(using).get(pk=instance.pk)
+    except sender.DoesNotExist:
+        msg = ("Unable to get previous instance, even though there was an "
+               "allegedly correct primary key: {}".format(instance.pk))
+        logger.error(msg, exc_info=1)
+        return False
 
     a_url_changed = False
 
     # we know we'll have at least one URL to compare and handle.
     for attrib in valid_attrs_to_check:
-        new_url = getattr(instance, attrib, None)
-        old_url = getattr(previous_obj, attrib, None)
-
-        # if they're methods (which they usually are) then try and call them.
-        if new_url is not None and callable(new_url):
-            new_url = new_url()
-        if old_url is not None and callable(old_url):
-            old_url = old_url()
+        new_url = maybecallattr(instance, attrib)
+        old_url = maybecallattr(previous_obj, attrib)
 
         # make sure both sides aren't stupid
         if not all((old_url, new_url)):
@@ -71,25 +73,42 @@ def maybe_update_redirect(sender, instance, using, *args, **kwargs):
             continue
 
         a_url_changed = True
+        site_id = Site.objects.get_current().pk
 
-        # either update the existing redirect to point to the new url, or
-        # create a new one - avoiding any further signals listening to Redirect
-
-        try:
-            # ask for any old redirect that exists for the old url
-            old_redirect = manager.get(old_path=old_url)
-        except Redirect.DoesNotExist:
-            # there was no previous redirect, and the URLs aren't the same,
-            # so we'll create one.
-            manager.create(old_path=old_url, new_path=new_url,
-                           site=Site.objects.get_current())
-        else:
-            # there was a previous redirect instance, so update it.
-            manager.filter(pk=old_redirect.pk).update(new_path=new_url)
-
-        # delete anything that has our *new* URL as its old path.
-        manager.filter(old_path=new_url).delete()
+        # this may fire via celery, or immeidiately, depending on if
+        # celery is installed.
+        # We pass the site id through on the offchance the celery instance
+        # is not using the same site_id as the signal which triggered
+        # the call.
+        update_redirect.delay(old_url=old_url, new_url=new_url, using=using,
+                              site_id=site_id)
     return a_url_changed
+
+
+@shared_task
+def update_redirect(using, old_url, new_url, site_id):
+    """
+    either update the existing redirect to point to the new url, or
+    create a new one - avoiding any further signals listening to Redirect
+    """
+    manager = Redirect.objects.using(using)
+
+    # delete anything that has our *new* URL as its old path.
+    manager.filter(old_path=new_url, site_id=site_id).delete()
+
+    try:
+        # ask for any old redirect that exists for the old url
+        old_redirect = manager.get(old_path=old_url, site_id=site_id)
+    except Redirect.DoesNotExist:
+        # there was no previous redirect, and the URLs aren't the same,
+        # so we'll create one.
+        return manager.create(old_path=old_url, new_path=new_url,
+                              site_id=site_id)
+
+    # there was a previous redirect instance, so update it.
+    # also we shouldn't need to filter by the site here, because there
+    # won't be multiple sites using the same pks.
+    return manager.filter(pk=old_redirect.pk).update(new_path=new_url)
 
 
 class URLMonitorConfigError(ImproperlyConfigured):
